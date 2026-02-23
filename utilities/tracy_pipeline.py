@@ -82,8 +82,9 @@ class TracyPipeline:
 
     def _execute_decompose(self, ref: str, ab1: str, prefix: str, config: TracyConfig, hgvs_config: HGVSConfig | None = None, annotator: HGVSAnnotator | None = None) -> str:
         """Executes the tracy decompose command."""
+        tracy_bin = os.environ.get("TRACY_PATH", "tracy")
         cmd = [
-            "tracy", "decompose",
+            tracy_bin, "decompose",
             "-p", str(config.pratio), "-k", str(config.kmer),
             "-s", str(config.support), "-i", str(config.maxindel),
             "-g", str(config.gapopen), "-e", str(config.gapext),
@@ -385,7 +386,8 @@ class TracyPipeline:
             output_prefix = os.path.join(temp_dir, os.path.splitext(base_name)[0])
             json_file = f"{output_prefix}.json"
 
-            cmd = ["tracy", "basecall", ab1_path, "-f", "json", "-o", json_file]
+            tracy_bin = os.environ.get("TRACY_PATH", "tracy")
+            cmd = [tracy_bin, "basecall", ab1_path, "-f", "json", "-o", json_file]
 
             try:
                 subprocess.run(cmd, check=True, capture_output=True)
@@ -426,7 +428,8 @@ class TracyPipeline:
             json_file = f"{output_prefix}.json"
 
             # Run tracy align
-            cmd = ["tracy", "align", "-r", reference_path, ab1_path, "-o", output_prefix]
+            tracy_bin = os.environ.get("TRACY_PATH", "tracy")
+            cmd = [tracy_bin, "align", "-r", reference_path, ab1_path, "-o", output_prefix]
 
             try:
                 subprocess.run(cmd, check=True, capture_output=True)
