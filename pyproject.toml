@@ -1,0 +1,41 @@
+[project]
+name = "bio-engine"
+version = "0.1.0"
+description = "Bioinformatics sidecar engine for MSAnalyzer"
+authors = [
+    {name = "Pablo Fernández Lagos", email = "pablofdezlagos@gmail.com"},
+]
+dependencies = [
+    "fastapi>=0.100.0",
+    "uvicorn>=0.20.0",
+    "biopython>=1.80",
+    "hgvs>=1.5.0",
+    "psycopg2-binary>=2.9.0",  # Using binary for easier install, switch to psycopg2 if needed for prod
+    "bioutils>=0.6.0",
+    "pydantic>=2.0.0",
+    "pydantic-settings>=2.0.0",
+    "orjson>=3.9.0",
+    "aiofiles>=23.0.0",
+]
+requires-python = ">=3.10"
+readme = "README.md"
+license = {text = "Proprietary"}
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+select = [
+    "E",  # pycodestyle errors
+    "W",  # pycodestyle warnings
+    "F",  # pyflakes
+    "I",  # isort
+    "B",  # flake8-bugbear
+    "UP", # pyupgrade
+]
+ignore = []
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+line-ending = "auto"
