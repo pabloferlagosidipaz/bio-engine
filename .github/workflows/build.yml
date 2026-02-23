@@ -2,8 +2,8 @@ name: Build and Release Bio-Engine
 
 on:
   release:
-    types: [created] # This triggers automatically when you publish a new Release on GitHub
-  workflow_dispatch: # This allows you to manually press a "Run workflow" button from the Actions tab
+    types: [created]
+  workflow_dispatch: 
 
 jobs:
   build:
@@ -11,8 +11,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        # This creates 3 parallel jobs for the 3 operating systems
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        os: [ubuntu-latest, windows-latest]
 
     steps:
       - name: Checkout Code
@@ -31,8 +30,7 @@ jobs:
           pip install pyinstaller
 
       - name: Build with PyInstaller
-        # Add any necessary --hidden-import flags here if Uvicorn/FastAPI complain during runtime
-        run: pyinstaller --name bio-engine --onefile --hidden-import uvicorn.logging --hidden-import uvicorn.loops --hidden-import uvicorn.loops.auto --hidden-import uvicorn.protocols.http.auto --hidden-import uvicorn.protocols.websockets.auto main.py 
+        run: pyinstaller bio-engine.spec
 
       - name: Upload to GitHub Release
         uses: softprops/action-gh-release@v1
