@@ -19,7 +19,7 @@ class PersistenceManager:
     Manages local storage paths for the application, ensuring that 
     required directories exist across different operating systems.
     """
-    def __init__(self, app_name: str = "ms-analyzer"):
+    def __init__(self, app_name: str = "ps-analyzer"):
         self.app_name = app_name
         self.base_dir = self._get_user_data_dir()
         self._ensure_dirs()

@@ -1,6 +1,6 @@
 # Bio-Engine Sidecar
 
-The Bio-Engine is an asynchronous backend service designed to handle heavy bioinformatics computational tasks for MSAnalyzer. It acts as an integration layer between the main web application and native bioinformatics tools like `tracy`, executing alignments, variant calling, and sequence annotations (HGVS, VEP).
+The Bio-Engine is an asynchronous backend service designed to handle heavy bioinformatics computational tasks for [PS Analyzer](https://github.com/pabloferlagosidipaz/ps-analyzer). It acts as an integration layer between the main web application and native bioinformatics tools like `tracy`, executing alignments, variant calling, and sequence annotations (HGVS, VEP).
 
 ## Features
 - **Asynchronous Job Management**: Jobs are executed in isolated background threads.

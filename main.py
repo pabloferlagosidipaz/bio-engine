@@ -2,7 +2,7 @@
 Bio-Engine Sidecar Entry Point
 ==============================
 
-This module is the entry point for the MSAnalyzer Bio-Engine sidecar.
+This module is the entry point for the PS Analyzer Bio-Engine sidecar.
 It initializes the FastAPI application, sets up logging, CORS, and
 global exception handlers, and configures Uvicorn for serving the API.
 """

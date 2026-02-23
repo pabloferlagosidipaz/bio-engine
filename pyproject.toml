@@ -1,7 +1,7 @@
 [project]
 name = "bio-engine"
 version = "0.2.1"
-description = "Bioinformatics sidecar engine for MSAnalyzer"
+description = "Bioinformatics sidecar engine for PS Analyzer"
 authors = [
     {name = "Pablo Fernández Lagos", email = "pablofdezlagos@gmail.com"},
 ]
