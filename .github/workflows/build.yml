@@ -1,6 +1,9 @@
 name: Build and Release Bio-Engine
 
 on:
+  push:
+    tags:
+      - 'v*'
   release:
     types: [created]
   workflow_dispatch: 
