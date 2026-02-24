@@ -16,7 +16,7 @@ jobs:
       contents: write
     strategy:
       matrix:
-        os: [ubuntu-22.04, windows-latest]
+        os: [ubuntu-22.04, ubuntu-24.04, windows-latest]
 
     steps:
       - name: Checkout Code
@@ -54,6 +54,11 @@ jobs:
 
       - name: Build with PyInstaller
         run: pyinstaller bio-engine.spec
+
+      - name: Rename Linux Binary
+        if: matrix.os != 'windows-latest'
+        run: |
+          mv dist/bio-engine dist/bio-engine-${{ matrix.os }}
 
       - name: Upload to GitHub Release
         uses: softprops/action-gh-release@v1
