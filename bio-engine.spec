@@ -1,24 +1,36 @@
 # -*- mode: python ; coding: utf-8 -*-
-from PyInstaller.utils.hooks import collect_all
+from PyInstaller.utils.hooks import collect_all, collect_submodules
 import sys
 import os
+import site
 
 # Get the environment prefix dynamically
 conda_prefix = sys.prefix
 
+# Get the actual site-packages directory
+site_packages = site.getsitepackages()
+print(f"INFO: sys.prefix = {sys.prefix}")
+print(f"INFO: site-packages = {site_packages}")
+
 datas = []
 binaries = []
 
-import shutil
-
 # Tracy will be handled by Tauri, not bundled here
-
 
 # Optionally include these shared libraries only if they exist (Linux/Conda specific fixes)
 for lib in ['libcrypto.so.3', 'libssl.so.3']:
     lib_path = os.path.join(conda_prefix, 'lib', lib)
     if os.path.exists(lib_path):
         binaries.append((lib_path, '.'))
+
+# Verify that critical packages can be imported before proceeding
+import importlib
+for pkg in ['uvicorn', 'fastapi', 'h11', 'starlette']:
+    try:
+        mod = importlib.import_module(pkg)
+        print(f"INFO: {pkg} found at {mod.__file__}")
+    except ImportError as e:
+        print(f"ERROR: {pkg} NOT FOUND: {e}")
 
 hiddenimports = [
     'fastapi', 
@@ -66,7 +78,16 @@ hiddenimports = [
     'pkg_resources'
 ]
 
-# Collect all dependencies
+# Collect all submodules explicitly for critical packages
+for pkg in ['uvicorn', 'fastapi', 'starlette', 'h11', 'anyio']:
+    try:
+        submods = collect_submodules(pkg)
+        hiddenimports += submods
+        print(f"INFO: Collected {len(submods)} submodules for {pkg}")
+    except Exception as e:
+        print(f"WARNING: Could not collect submodules for {pkg}: {e}")
+
+# Collect all dependencies (data, binaries, and hidden imports)
 packages_to_collect = [
     'fastapi', 'uvicorn', 'h11', 'click', 'anyio', 'sniffio', 'starlette',
     'Bio', 'hgvs', 'ometa', 'parsley', 'terml', 
@@ -79,12 +100,18 @@ for package in packages_to_collect:
         datas += tmp_ret[0]
         binaries += tmp_ret[1]
         hiddenimports += tmp_ret[2]
+        print(f"INFO: collect_all({package}) -> {len(tmp_ret[0])} datas, {len(tmp_ret[1])} binaries, {len(tmp_ret[2])} hiddenimports")
     except Exception as e:
         print(f"WARNING: Could not collect {package}: {e}")
 
+# Build search paths: include site-packages so PyInstaller can find all installed modules
+pathex = ['.']
+pathex += site_packages
+pathex.append(os.path.join(conda_prefix, 'lib'))
+
 a = Analysis(
     ['main.py'],
-    pathex=['.', os.path.join(conda_prefix, 'lib')],
+    pathex=pathex,
     binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,

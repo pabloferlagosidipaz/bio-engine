@@ -34,9 +34,29 @@ jobs:
           pip install -r requirements.txt
           pip install pyinstaller
 
+      - name: Verify installed packages
+        run: |
+          python -c "import uvicorn; print(f'uvicorn OK: {uvicorn.__file__}')"
+          python -c "import fastapi; print(f'fastapi OK: {fastapi.__file__}')"
+          python -c "import h11; print(f'h11 OK: {h11.__file__}')"
+          python -c "import starlette; print(f'starlette OK: {starlette.__file__}')"
+          pip show uvicorn
+          pip show pyinstaller
+
       - name: Build with PyInstaller
         run: pyinstaller bio-engine.spec
 
+      - name: Verify build output (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          ls -lh dist/
+          file dist/bio-engine
+
+      - name: Verify build output (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          dir dist\
+          
       - name: Upload to GitHub Release
         uses: softprops/action-gh-release@v1
         if: startsWith(github.ref, 'refs/tags/')
