@@ -8,6 +8,7 @@ and biological database communication (e.g., fetching references, HGVS variants)
 """
 
 import logging
+import os
 
 from fastapi import APIRouter, BackgroundTasks
 
@@ -23,6 +24,7 @@ from data.models import (
     RenameJobRequest,
     ShareJobRequest,
     UpdateJobRequest,
+    ProxyConfigRequest,
 )
 from services import aligner as aligner_service
 from services import reference as ref_service
@@ -78,6 +80,29 @@ def delete_comment(job_id: str, variant_key: str, comment_id: str):
 def health_check():
     """Returns the basic health status of the engine."""
     return {"status": "online", "engine": "bio-engine"}
+
+@router.post("/config/proxy")
+def configure_proxy(request: ProxyConfigRequest):
+    """
+    Dynamically configures HTTP/HTTPS proxy settings for the engine.
+    """
+    if request.http_proxy is not None:
+        if request.http_proxy == "":
+            os.environ.pop("HTTP_PROXY", None)
+            os.environ.pop("http_proxy", None)
+        else:
+            os.environ["HTTP_PROXY"] = request.http_proxy
+            os.environ["http_proxy"] = request.http_proxy
+            
+    if request.https_proxy is not None:
+        if request.https_proxy == "":
+            os.environ.pop("HTTPS_PROXY", None)
+            os.environ.pop("https_proxy", None)
+        else:
+            os.environ["HTTPS_PROXY"] = request.https_proxy
+            os.environ["https_proxy"] = request.https_proxy
+            
+    return {"status": "success", "http_proxy": os.environ.get("HTTP_PROXY"), "https_proxy": os.environ.get("HTTPS_PROXY")}
 
 @router.get("/check-reference")
 def check_reference(id: str):

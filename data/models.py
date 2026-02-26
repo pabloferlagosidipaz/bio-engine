@@ -240,3 +240,7 @@ class HGVSRequest(BaseModel):
     pos: int
     ref: str
     alt: str
+
+class ProxyConfigRequest(BaseModel):
+    http_proxy: str | None = None
+    https_proxy: str | None = None
