@@ -17,6 +17,8 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from core.exceptions import BioEngineError
+
 logger = logging.getLogger(__name__)
 
 # In-memory install/uninstall task registry. Survives for the process lifetime.
@@ -75,6 +77,27 @@ def init_opencravat(oc_path: str = "oc"):
 
 _SIZE_PATTERN = re.compile(r"([\d.]+)\s*(B|KB|MB|GB|TB)", re.IGNORECASE)
 _SIZE_UNITS = {"B": 1, "KB": 1024, "MB": 1024**2, "GB": 1024**3, "TB": 1024**4}
+
+
+def resolve_oc_executable(oc_path: str) -> str:
+    """
+    Validates that `oc_path` resolves to a real, executable binary before it
+    is trusted as argv[0] of a subprocess call (see CWE for uncontrolled
+    executable path). Bare names (e.g. "oc") are resolved via PATH, same as
+    subprocess.run would do; explicit paths must point at an existing file.
+
+    Returns the resolved path unchanged (callers keep using whatever form -
+    bare name or absolute path - they were given; this only validates it).
+    Raises BioEngineError (400) if nothing executable is found.
+    """
+    resolved = shutil.which(oc_path)
+    if not resolved:
+        raise BioEngineError(
+            f"'{oc_path}' does not resolve to an executable binary",
+            context="oc_path_validation",
+            status_code=400,
+        )
+    return oc_path
 
 
 # ---------------------------------------------------------------------------

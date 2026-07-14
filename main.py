@@ -27,6 +27,7 @@ from fastapi.responses import JSONResponse
 from api.routes import router
 from core.config import settings
 from core.exceptions import BioEngineError
+from core.security import TRUSTED_ORIGIN_REGEX
 
 logger = logging.getLogger(__name__)
 
@@ -78,7 +79,7 @@ app.add_middleware(
         "http://127.0.0.1",
         "tauri://localhost"
     ],
-    allow_origin_regex=r"^https?://localhost(:\d+)?|^https?://127\.0\.0\.1(:\d+)?|^tauri://localhost$",
+    allow_origin_regex=TRUSTED_ORIGIN_REGEX,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -93,7 +94,7 @@ async def bio_engine_exception_handler(request: Request, exc: BioEngineError):
     with a 500 status code, exposing the exception type, message, and context.
     """
     return JSONResponse(
-        status_code=500,
+        status_code=exc.status_code,
         content={
             "type": type(exc).__name__,
             "message": exc.message,

@@ -20,6 +20,8 @@ from sqlalchemy.orm import Session
 from core.cache import cache
 from core.database import Base, engine, get_db
 from core.exceptions import BioEngineError
+from core.paths import resolve_within, safe_filename_join
+from core.security import require_trusted_origin
 from data.models import (
     AddCommentRequest,
     AddHGVSAlternativesRequest,
@@ -53,8 +55,110 @@ Base.metadata.create_all(bind=engine)
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(require_trusted_origin)])
 job_manager = JobManager()
+
+# Matches an absolute genomic HGVS/SPDI identifier, e.g. "NC_000019.10:g.38494330C>T"
+# or its SPDI form "19:38494329:C:T". Used to check whether a candidate
+# already carries genomic (not just transcript-relative) coordinates.
+_GENOMIC_HGVS_RE = r"(?:NC_0000\d{2}|NC_012920|(?:chr)?(?:[1-9]|1\d|2[0-2]|X|Y|MT|M))[:.](?:g\.)?\d+"
+# Same shape as above, but with capture groups for chromosome/position extraction.
+#
+# The separator before the position is `(?:\.\d+)?:` rather than a bare
+# `[:.]`: a versioned accession (e.g. "NC_000017.11:g.43045712T>C") has a
+# ".VERSION" segment before the ":g." part, and a bare `[:.]` would match
+# that "." first, capturing the version number ("11") as if it were the
+# position instead of the real position (43045712). Requiring the
+# optional ".VERSION" to be consumed before the mandatory ":" fixes this
+# while leaving unversioned HGVS and SPDI forms (which have no "." here)
+# unaffected.
+_GENOMIC_HGVS_CAPTURE_RE = r"(?:NC_0000(\d{2})|(NC_012920)|(?:chr)?(\d{1,2}|X|Y|MT|M))(?:\.\d+)?:(?:g\.)?(\d+)"
+
+
+def _resolve_genomic_variant_from_hgvs(job: Job, job_id: str, hgvs_key: str, row: list, col_map: dict) -> dict | None:
+    """
+    Resolves absolute genomic (chromosome, position) coordinates for a
+    variant's HGVS key: checks its cached alternatives first, falling back
+    to an on-the-fly Ensembl lookup if none are genomic yet, then parses
+    the first genomic HGVS/SPDI candidate found.
+
+    Shared by both variant_key forms handled in update_variant_status
+    (patient-scoped row index and grouped genomic position); this logic
+    was previously duplicated near-verbatim between the two branches.
+    """
+    alts = job.hgvs_alternatives.get(hgvs_key, [])
+    has_genomic = any(re.match(_GENOMIC_HGVS_RE, a) for a in [hgvs_key] + alts)
+
+    if not has_genomic:
+        try:
+            from utilities.ensembl_hgvs import EnsemblHGVS
+            logger.info(f"Sync: Fetching genomic alternatives for {hgvs_key} on-the-fly...")
+            ensembl = EnsemblHGVS(assembly=job.hgvs_config.assembly if job.hgvs_config else "GRCh38")
+            results = ensembl.get_equivalents_batch([hgvs_key])
+            new_alts = results.get(hgvs_key, [])
+            if new_alts:
+                alts = list(set(alts + new_alts))
+                job_manager.add_job_hgvs_alternatives(job_id, hgvs_key, alts)
+        except Exception as e:
+            logger.warning(f"On-the-fly HGVS fetch failed for {hgvs_key}: {e}")
+
+    candidates = [hgvs_key] + alts
+    logger.info(f"Sync: Checking {len(candidates)} HGVS/SPDI candidates for {hgvs_key}")
+    for alt in candidates:
+        # Match both NC_0000XX.X:g.XXXX (HGVS) and NC_0000XX.X:XXXX:A:T (SPDI)
+        # And chromosome numbers like 19:g.XXXX or 19:XXXX:A:T
+        match = re.match(_GENOMIC_HGVS_CAPTURE_RE, alt)
+        if match:
+            chrom = match.group(1) or (match.group(2) and "MT") or match.group(3)
+            if chrom == "M": chrom = "MT"
+            if chrom.isdigit(): chrom = str(int(chrom))
+
+            pos = int(match.group(4))
+            # SPDI is 0-based, HGVS is 1-based.
+            # SPDI usually looks like Ac:Pos:Ref:Alt (3 colons)
+            # HGVS looks like Ac:g.PosRef>Alt
+            if ":g." not in alt and alt.count(":") >= 2:
+                pos += 1 # Normalize SPDI 0-based to 1-based
+
+            target_variant = {
+                "chromosome": chrom,
+                "position": pos,
+                "ref": row[col_map.get("REF", 0)],
+                "alt": row[col_map.get("ALT", 0)],
+                "gene": row[col_map.get("GENE", 0)] if "GENE" in col_map else job.hgvs_config.gene if job.hgvs_config else None
+            }
+            logger.info(f"Sync: Resolved to Chr {target_variant['chromosome']} Pos {target_variant['position']} from {alt}")
+            return target_variant
+
+    return None
+
+
+def _resolve_genomic_variant_from_reference(job: Job, row: list, col_map: dict, position: int) -> dict | None:
+    """
+    Fallback used when HGVS-based resolution didn't produce coordinates: if
+    the job's reference is itself a genomic NC_ accession, derive the
+    chromosome directly from it (position is already known from the row).
+
+    Shared by both variant_key forms in update_variant_status; previously
+    duplicated near-verbatim between the two branches.
+    """
+    if job.reference.get("type") != "ncbi":
+        return None
+
+    ref_val = job.reference.get("value", "")
+    match = re.search(r"NC_0000(\d{2})", ref_val)
+    if not match:
+        return None
+
+    target_variant = {
+        "chromosome": str(int(match.group(1))),
+        "position": position,
+        "ref": row[col_map.get("REF", 0)],
+        "alt": row[col_map.get("ALT", 0)],
+        "gene": row[col_map.get("GENE", 0)] if "GENE" in col_map else job.hgvs_config.gene if job.hgvs_config else None
+    }
+    logger.info(f"Sync: Resolved via Job Reference to Chr {target_variant['chromosome']} Pos {target_variant['position']}")
+    return target_variant
 
 @router.post("/jobs/{job_id}/comments", response_model=Job)
 def add_comment(job_id: str, request: AddCommentRequest):
@@ -110,9 +214,6 @@ def update_variant_status(job_id: str, request: UpdateVariantStatusRequest, db: 
             col_map = {col.upper(): i for i, col in enumerate(cols)}
 
             try:
-                # 1. Map columns
-                col_map = {col.upper(): i for i, col in enumerate(cols)}
-
                 # If variant_id is a row index (usually when patient_id is present)
                 if patient_id:
                     v_idx = int(variant_id)
@@ -121,67 +222,13 @@ def update_variant_status(job_id: str, request: UpdateVariantStatusRequest, db: 
                         # Priority: Extract both Chr and Pos from HGVS equivalents (Absolute Genomic Coordinates)
                         hgvs_key = row[col_map["HGVS"]] if "HGVS" in col_map else None
                         if hgvs_key:
-                            # Try to fetch alternatives on the fly if missing or not genomic
-                            alts = job.hgvs_alternatives.get(hgvs_key, [])
-                            has_genomic = any(re.match(r"(?:NC_0000\d{2}|NC_012920|(?:chr)?(?:[1-9]|1\d|2[0-2]|X|Y|MT|M))[:.](?:g\.)?\d+", a) for a in [hgvs_key] + alts)
-
-                            if not has_genomic:
-                                try:
-                                    from utilities.ensembl_hgvs import EnsemblHGVS
-                                    logger.info(f"Sync: Fetching genomic alternatives for {hgvs_key} on-the-fly...")
-                                    ensembl = EnsemblHGVS(assembly=job.hgvs_config.assembly if job.hgvs_config else "GRCh38")
-                                    results = ensembl.get_equivalents_batch([hgvs_key])
-                                    new_alts = results.get(hgvs_key, [])
-                                    if new_alts:
-                                        alts = list(set(alts + new_alts))
-                                        job_manager.add_job_hgvs_alternatives(job_id, hgvs_key, alts)
-                                    # Ensure we update has_genomic after fetching new alternatives
-                                    has_genomic = any(re.match(r"(?:NC_0000\d{2}|NC_012920|(?:chr)?(?:[1-9]|1\d|2[0-2]|X|Y|MT|M))[:.](?:g\.)?\d+", a) for a in [hgvs_key] + alts)
-                                except Exception as e:
-                                    logger.warning(f"On-the-fly HGVS fetch failed for {hgvs_key}: {e}")
-
-                            # Candidates: the hgvs_key itself + its alternatives
-                            candidates = [hgvs_key] + alts
-                            logger.info(f"Sync: Checking {len(candidates)} HGVS/SPDI candidates for {hgvs_key} (patient {patient_id})")
-                            for alt in candidates:
-                                # Match both NC_0000XX.X:g.XXXX (HGVS) and NC_0000XX.X:XXXX:A:T (SPDI)
-                                # And chromosome numbers like 19:g.XXXX or 19:XXXX:A:T
-                                match = re.match(r"(?:NC_0000(\d{2})|(NC_012920)|(?:chr)?(\d{1,2}|X|Y|MT|M))[:.](?:g\.)?(\d+)", alt)
-                                if match:
-                                    chrom = match.group(1) or (match.group(2) and "MT") or match.group(3)
-                                    if chrom == "M": chrom = "MT"
-                                    if chrom.isdigit(): chrom = str(int(chrom))
-
-                                    pos = int(match.group(4))
-                                    # SPDI is 0-based, HGVS is 1-based.
-                                    # SPDI usually looks like Ac:Pos:Ref:Alt (3 colons)
-                                    # HGVS looks like Ac:g.PosRef>Alt
-                                    if ":g." not in alt and alt.count(":") >= 2:
-                                        pos += 1 # Normalize SPDI 0-based to 1-based
-
-                                    target_variant = {
-                                        "chromosome": chrom,
-                                        "position": pos,
-                                        "ref": row[col_map.get("REF", 0)],
-                                        "alt": row[col_map.get("ALT", 0)],
-                                        "gene": row[col_map.get("GENE", 0)] if "GENE" in col_map else job.hgvs_config.gene if job.hgvs_config else None
-                                    }
-                                    logger.info(f"Sync: Resolved to Chr {target_variant['chromosome']} Pos {target_variant['position']} from {alt}")
-                                    break
+                            target_variant = _resolve_genomic_variant_from_hgvs(job, job_id, hgvs_key, row, col_map)
 
                         # Fallback: if reference is genomic NC_...
-                        if not target_variant and job.reference.get("type") == "ncbi":
-                            ref_val = job.reference.get("value", "")
-                            match = re.search(r"NC_0000(\d{2})", ref_val)
-                            if match:
-                                target_variant = {
-                                    "chromosome": str(int(match.group(1))),
-                                    "position": int(row[col_map.get("POS", 0)]),
-                                    "ref": row[col_map.get("REF", 0)],
-                                    "alt": row[col_map.get("ALT", 0)],
-                                    "gene": row[col_map.get("GENE", 0)] if "GENE" in col_map else job.hgvs_config.gene if job.hgvs_config else None
-                                }
-                                logger.info(f"Sync: Resolved via Job Reference to Chr {target_variant['chromosome']} Pos {target_variant['position']}")
+                        if not target_variant:
+                            target_variant = _resolve_genomic_variant_from_reference(
+                                job, row, col_map, int(row[col_map.get("POS", 0)])
+                            )
 
                         if not target_variant:
                             logger.warning(f"Variant {request.variant_key} skipped: Could not resolve genomic coordinates.")
@@ -195,61 +242,11 @@ def update_variant_status(job_id: str, request: UpdateVariantStatusRequest, db: 
                             # Extract both Chr and Pos from HGVS (Absolute Genomic Coordinates)
                             hgvs_key = row[col_map["HGVS"]] if "HGVS" in col_map else None
                             if hgvs_key:
-                                # Try to fetch alternatives on the fly if missing or not genomic
-                                alts = job.hgvs_alternatives.get(hgvs_key, [])
-                                has_genomic = any(re.match(r"(?:NC_0000\d{2}|NC_012920|(?:chr)?(?:[1-9]|1\d|2[0-2]|X|Y|MT|M))[:.](?:g\.)?\d+", a) for a in [hgvs_key] + alts)
-
-                                if not has_genomic:
-                                    try:
-                                        from utilities.ensembl_hgvs import EnsemblHGVS
-                                        logger.info(f"Sync: Fetching genomic alternatives for {hgvs_key} on-the-fly...")
-                                        ensembl = EnsemblHGVS(assembly=job.hgvs_config.assembly if job.hgvs_config else "GRCh38")
-                                        results = ensembl.get_equivalents_batch([hgvs_key])
-                                        new_alts = results.get(hgvs_key, [])
-                                        if new_alts:
-                                            alts = list(set(alts + new_alts))
-                                            job_manager.add_job_hgvs_alternatives(job_id, hgvs_key, alts)
-                                        # Ensure we update has_genomic after fetching new alternatives
-                                        has_genomic = any(re.match(r"(?:NC_0000\d{2}|NC_012920|(?:chr)?(?:[1-9]|1\d|2[0-2]|X|Y|MT|M))[:.](?:g\.)?\d+", a) for a in [hgvs_key] + alts)
-                                    except Exception as e:
-                                        logger.warning(f"On-the-fly HGVS fetch failed for {hgvs_key}: {e}")
-
-                                candidates = [hgvs_key] + alts
-                                logger.info(f"Sync: Checking {len(candidates)} HGVS/SPDI candidates for {hgvs_key}")
-                                for alt in candidates:
-                                    match = re.match(r"(?:NC_0000(\d{2})|(NC_012920)|(?:chr)?(\d{1,2}|X|Y|MT|M))[:.](?:g\.)?(\d+)", alt)
-                                    if match:
-                                        chrom = match.group(1) or (match.group(2) and "MT") or match.group(3)
-                                        if chrom == "M": chrom = "MT"
-                                        if chrom.isdigit(): chrom = str(int(chrom))
-
-                                        pos = int(match.group(4))
-                                        if ":g." not in alt and alt.count(":") >= 2:
-                                            pos += 1 # Normalize SPDI 0-based to 1-based
-
-                                        target_variant = {
-                                            "chromosome": chrom,
-                                            "position": pos,
-                                            "ref": row[col_map.get("REF", 0)],
-                                            "alt": row[col_map.get("ALT", 0)],
-                                            "gene": row[col_map.get("GENE", 0)] if "GENE" in col_map else job.hgvs_config.gene if job.hgvs_config else None
-                                        }
-                                        logger.info(f"Sync: Resolved to Chr {target_variant['chromosome']} Pos {target_variant['position']} from {alt}")
-                                        break
+                                target_variant = _resolve_genomic_variant_from_hgvs(job, job_id, hgvs_key, row, col_map)
 
                             # Fallback: if reference is genomic NC_...
-                            if not target_variant and job.reference.get("type") == "ncbi":
-                                ref_val = job.reference.get("value", "")
-                                match = re.search(r"NC_0000(\d{2})", ref_val)
-                                if match:
-                                    target_variant = {
-                                        "chromosome": str(int(match.group(1))),
-                                        "position": target_pos,
-                                        "ref": row[col_map.get("REF", 0)],
-                                        "alt": row[col_map.get("ALT", 0)],
-                                        "gene": row[col_map.get("GENE", 0)] if "GENE" in col_map else job.hgvs_config.gene if job.hgvs_config else None
-                                    }
-                                    logger.info(f"Sync: Resolved via Job Reference to Chr {target_variant['chromosome']} Pos {target_variant['position']}")
+                            if not target_variant:
+                                target_variant = _resolve_genomic_variant_from_reference(job, row, col_map, target_pos)
 
                             if target_variant: break
 
@@ -347,7 +344,9 @@ def configure_opencravat(request: OpenCravatConfigRequest):
     """
     from core.config import settings
     if request.oc_path is not None:
-        settings.oc_path = request.oc_path if request.oc_path != "" else "oc"
+        new_path = request.oc_path if request.oc_path != "" else "oc"
+        oc_service.resolve_oc_executable(new_path)
+        settings.oc_path = new_path
     return {"status": "success", "oc_path": settings.oc_path}
 
 @router.post("/upload")
@@ -358,7 +357,7 @@ async def upload_file(file: UploadFile = File(...)):
     """
     from core.config import settings
 
-    file_path = os.path.join(settings.uploads_dir, file.filename)
+    file_path = safe_filename_join(settings.uploads_dir, file.filename)
 
     try:
         with open(file_path, "wb") as buffer:
@@ -368,7 +367,7 @@ async def upload_file(file: UploadFile = File(...)):
         return {"path": file_path}
     except Exception as e:
         logger.error(f"Failed to upload file {file.filename}: {e}")
-        raise BioEngineError(f"Failed to upload file: {e}")
+        raise BioEngineError("Failed to upload file")
 
 @router.get("/check-reference")
 def check_reference(id: str):
@@ -392,12 +391,24 @@ def search_reference(query: str, assembly: str | None = None):
 
 @router.get("/preview-read")
 def preview_read(path: str):
-    """Returns trace data for a given file path."""
+    """Returns trace data for a given file path.
+
+    `path` must resolve inside uploads_dir or jobs_dir - the only two
+    places read files legitimately live (freshly uploaded, or copied in by
+    a job import) - to prevent it being used to read arbitrary files off
+    disk (CWE-22).
+    """
+    from core.config import settings
+
+    safe_path = resolve_within(path, [settings.uploads_dir, settings.jobs_dir])
+
     try:
-        return aligner_service.get_read_preview(path)
+        return aligner_service.get_read_preview(safe_path)
+    except BioEngineError:
+        raise
     except Exception as e:
         logger.error(f"Preview failed for {path}: {e}")
-        raise BioEngineError(f"Preview failed: {e}")
+        raise BioEngineError("Preview failed")
 
 @router.post("/create-job", response_model=Job)
 def create_job(request: CreateJobRequest):
@@ -591,7 +602,7 @@ def hgvs_alternatives(request: HGVSRequest):
 
     except Exception as e:
         logger.error(f"HGVS alternatives fetch failed: {e}")
-        raise BioEngineError(f"HGVS alternatives fetch failed: {e}")
+        raise BioEngineError("HGVS alternatives fetch failed")
 
 @router.post("/jobs/{job_id}/share", response_model=dict)
 def share_job(job_id: str, request: ShareJobRequest):
@@ -607,7 +618,7 @@ def share_job(job_id: str, request: ShareJobRequest):
         return {"status": "success", "export_path": export_path}
     except Exception as e:
         logger.error(f"Failed to export job {job_id}: {e}")
-        raise BioEngineError(f"Failed to export job {job_id}: {e}")
+        raise BioEngineError(f"Failed to export job {job_id}")
 
 @router.post("/jobs/import", response_model=Job)
 def import_job(request: ImportJobRequest, db: Session = Depends(get_db)):
@@ -683,7 +694,7 @@ def import_job(request: ImportJobRequest, db: Session = Depends(get_db)):
     except Exception as e:
         logger.error(f"Failed to import job from {request.source_folder}: {e}")
         db.rollback()
-        raise BioEngineError(f"Failed to import job: {e}")
+        raise BioEngineError("Failed to import job")
 
 @router.post("/variants/approve")
 def approve_variant(request: ApproveVariantRequest, db: Session = Depends(get_db)):
